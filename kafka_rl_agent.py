@@ -12,7 +12,9 @@ from typing import Dict, Any, Optional, Deque
 from collections import deque
 import joblib
 import os
+import torch
 
+from performance_logger import PerformanceLogger
 from stable_baselines3 import PPO, A2C
 from pricing_environment import DynamicPricingEnv
 from kafka_config import (
@@ -39,6 +41,8 @@ class KafkaRLAgent:
             'warm_up_steps': 5,        # Steps before making decisions
             'fallback_pricing': True   # Use fallback pricing if model fails
         }
+
+        self.performance_logger = PerformanceLogger()
         
         # Model management
         self.model = None
@@ -141,6 +145,8 @@ class KafkaRLAgent:
                 'hour_of_day': market_data.get('hour_of_day', 0),
                 'day_of_week': market_data.get('day_of_week', 0)
             }
+
+            self.performance_logger.log_market_event(market_info)
             
             # Update current price
             if 'our_price' in market_data:
@@ -157,6 +163,7 @@ class KafkaRLAgent:
             
         except Exception as e:
             logger.error(f"Error handling market event: {e}")
+
     
     def _convert_to_observation(self, market_info: Dict[str, Any]) -> np.ndarray:
         """Convert market information to RL environment observation"""
@@ -214,53 +221,74 @@ class KafkaRLAgent:
     def _make_pricing_decision(self, market_info: Dict[str, Any]) -> Dict[str, Any]:
         """Make pricing decision based on market information"""
         start_time = time.time()
-        
+    
         try:
             if self.model and len(self.observation_history) >= self.agent_config['warm_up_steps']:
-                # Use trained RL model
+            # Use trained RL model
                 observation = self._convert_to_observation(market_info)
                 action, _ = self.model.predict(observation, deterministic=False)
-                
-                # Convert action to price
-                if isinstance(action, np.ndarray):
-                    price_multiplier = 1.0 + float(action[0])
-                else:
-                    price_multiplier = 1.0 + float(action)
-                
+
+                # Convert observation to tensor
+                obs_tensor = torch.tensor(observation, dtype=torch.float32)
+                if obs_tensor.ndim == 1:
+                    obs_tensor = obs_tensor.unsqueeze(0)
+
+                # Forward pass through the policy to get action distribution
+                with torch.no_grad():
+                    distribution = self.model.policy.get_distribution(obs_tensor)
+                    dist_obj = distribution.distribution
+
+                    if hasattr(dist_obj, "probs"):  # Discrete (Categorical)
+                        action_probs = dist_obj.probs.cpu().numpy()[0]
+                        confidence = float(np.max(action_probs))
+                    else:  # Continuous (Normal)
+                        mean = dist_obj.mean.cpu().numpy()[0]
+                        std = dist_obj.stddev.cpu().numpy()[0]
+                        # Define "confidence" as inverse of std (uncertainty)
+                        confidence = float(1.0 / (1.0 + np.mean(std)))
+            
                 # Apply constraints
                 max_change = self.agent_config['max_price_change']
-                price_multiplier = np.clip(price_multiplier, 1.0 - max_change, 1.0 + max_change)
-                
+                raw_action = float(action[0]) if isinstance(action, np.ndarray) else float(action)
+                # Scale action with tanh → keeps values in [-max_change, +max_change]
+                scaled_action=raw_action * max_change * 2.0
+                price_multiplier = 1.0 + scaled_action
+            
                 new_price = self.current_price * price_multiplier
-                
+            
                 # Ensure price is reasonable
                 min_price = self.base_price * 0.7
                 max_price = self.base_price * 2.0
                 new_price = np.clip(new_price, min_price, max_price)
-                
-                confidence = 0.8  # Could be enhanced with uncertainty estimation
+            
                 decision_type = 'rl_model'
                 self.stats['model_predictions'] += 1
-                
+
+                logger.info(f"Model prediction - Raw action: {raw_action:.3f}, "
+                             f"Scaled action: {scaled_action:.3f}, "
+                             f"Confidence: {confidence:.3f}, "
+                             f"STD: {np.mean(std):.3f}, "
+                             f"Price change: {((new_price - self.current_price) / self.current_price)*100:.1f}%")
+            
             else:
                 # Fallback pricing strategy
                 new_price = self._fallback_pricing_strategy(market_info)
                 confidence = 0.5
                 decision_type = 'fallback'
                 self.stats['fallback_decisions'] += 1
-            
+        
             # Calculate decision time
             decision_time = time.time() - start_time
             self.stats['avg_decision_time'] = (
                 (self.stats['avg_decision_time'] * self.stats['total_pricing_actions'] + decision_time) /
                 (self.stats['total_pricing_actions'] + 1)
             )
-            
+        
             # Store performance metrics
             price_change_percent = (new_price - self.current_price) / self.current_price
             self.stats['confidence_scores'].append(confidence)
             self.stats['price_changes'].append(price_change_percent)
-            
+        
             decision = {
                 'price': float(new_price),
                 'confidence': float(confidence),
@@ -274,9 +302,9 @@ class KafkaRLAgent:
                     'competitor_avg': float(np.mean(market_info.get('competitor_prices', [self.current_price])))
                 }
             }
-            
+        
             return decision
-            
+        
         except Exception as e:
             logger.error(f"Error making pricing decision: {e}")
             # Emergency fallback
@@ -287,6 +315,7 @@ class KafkaRLAgent:
                 'price_change_percent': 0.0,
                 'error': str(e)
             }
+
     
     def _fallback_pricing_strategy(self, market_info: Dict[str, Any]) -> float:
         """Fallback pricing strategy when RL model is not available"""
@@ -344,6 +373,7 @@ class KafkaRLAgent:
             )
             
             if success:
+                self.performance_logger.log_pricing_action(decision)
                 self.pricing_actions_sent.append(decision)
                 self.stats['total_pricing_actions'] += 1
                 self.stats['last_decision_time'] = datetime.utcnow().isoformat()
@@ -391,21 +421,35 @@ class KafkaRLAgent:
     def _consumer_loop(self):
         """Consumer loop - processes market events"""
         logger.info("RL Agent consumer loop started")
-        
-        self.consumer.start_consuming()
-        
+    
+        try:
+            self.consumer.start_consuming()
+        except Exception as e:
+            logger.error(f"Failed to start consumer: {e}")
+            return
+    
         while self.running:
             try:
                 self.consumer.consume_messages(
-                    callback=lambda topic, msg: None,  # Callback handled in setup
+                    callback=self._process_message,  # Use explicit callback
                     timeout=1.0,
                     max_messages=20
-                )
+            )
+                time.sleep(0.1)  # Small delay to prevent CPU spinning
             except Exception as e:
                 logger.error(f"Error in consumer loop: {e}")
                 time.sleep(1)
-        
+    
         logger.info("RL Agent consumer loop stopped")
+
+    def _process_message(self, topic, message):
+        """Process incoming message"""
+        try:
+            logger.debug(f"RL Agent received message from topic {topic}")
+            if topic == 'market_events':
+                self._handle_market_event(message)
+        except Exception as e:
+            logger.error(f"Error processing message: {e}")
     
     def _decision_loop(self):
         """Decision loop - makes pricing decisions periodically"""
@@ -496,6 +540,11 @@ class KafkaRLAgent:
         self.producer.close()
         
         logger.info("RL Agent stopped")
+
+        self.performance_logger.save_final_summary()
+        self.performance_logger.create_performance_graphs()
+        self.performance_logger.create_advanced_analysis()
+        report_file = self.performance_logger.generate_performance_report()
         
         return self.get_agent_stats()
     
@@ -543,6 +592,7 @@ if __name__ == "__main__":
         'decision_interval': args.decision_interval,
         'confidence_threshold': 0.3,
         'max_price_change': 0.1,
+        'observation_window':50,
         'fallback_pricing': True
     }
     

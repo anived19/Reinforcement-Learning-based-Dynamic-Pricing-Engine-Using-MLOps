@@ -8,9 +8,10 @@ import signal
 import sys
 import logging
 from typing import Dict, Any, List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import argparse
+
 
 from kafka_config import KafkaHealthChecker, KafkaTopicManager, KafkaConfig
 from kafka_market_generator import KafkaMarketDataStreamer, KafkaMarketDataMonitor
@@ -71,9 +72,10 @@ class SystemOrchestrator:
                     'enabled': True,
                     'model_path': None,  # Will use fallback pricing if no model
                     'config': {
-                        'decision_interval': 8.0,
-                        'confidence_threshold': 0.2,
-                        'max_price_change': 0.12
+                        'decision_interval': 3.0,
+                        'confidence_threshold': 0.1,
+                        'max_price_change': 0.12,
+                        'observation_window': 10
                     }
                 },
                 'pricing_environment': {
@@ -130,7 +132,9 @@ class SystemOrchestrator:
             self.components_running.append('market_streamer')
             self.system_stats['components_started'].append({
                 'component': 'market_streamer',
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': datetime.now(timezone.utc)
+
+.isoformat()
             })
             
             logger.info("Market Data Streamer started successfully")
@@ -140,7 +144,9 @@ class SystemOrchestrator:
             self.system_stats['errors'].append({
                 'component': 'market_streamer',
                 'error': str(e),
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': datetime.now(timezone.utc)
+
+.isoformat()
             })
             raise
     
@@ -161,7 +167,9 @@ class SystemOrchestrator:
             self.components_running.append('rl_agent')
             self.system_stats['components_started'].append({
                 'component': 'rl_agent',
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': datetime.now(timezone.utc)
+
+.isoformat()
             })
             
             logger.info("RL Agent started successfully")
@@ -171,7 +179,9 @@ class SystemOrchestrator:
             self.system_stats['errors'].append({
                 'component': 'rl_agent',
                 'error': str(e),
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': datetime.now(timezone.utc)
+
+.isoformat()
             })
             raise
     
@@ -187,6 +197,7 @@ class SystemOrchestrator:
                 'base_price': 110.0,
                 'base_cost': 75.0,
                 'price_elasticity': -1.6,
+                'initial_inventory':500,
                 'competitor_reactivity': 0.35
             }
             
@@ -202,7 +213,9 @@ class SystemOrchestrator:
             self.components_running.append('pricing_environment')
             self.system_stats['components_started'].append({
                 'component': 'pricing_environment',
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': datetime.now(timezone.utc)
+
+.isoformat()
             })
             
             logger.info("Pricing Environment started successfully")
@@ -212,7 +225,9 @@ class SystemOrchestrator:
             self.system_stats['errors'].append({
                 'component': 'pricing_environment',
                 'error': str(e),
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': datetime.now(timezone.utc)
+
+.isoformat()
             })
             raise
     
@@ -236,7 +251,9 @@ class SystemOrchestrator:
             self.components_running.append('monitor')
             self.system_stats['components_started'].append({
                 'component': 'monitor',
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': datetime.now(timezone.utc)
+
+.isoformat()
             })
             
             logger.info("System Monitor started successfully")
@@ -246,7 +263,9 @@ class SystemOrchestrator:
             self.system_stats['errors'].append({
                 'component': 'monitor',
                 'error': str(e),
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': datetime.now(timezone.utc)
+
+.isoformat()
             })
     
     def _run_monitor(self):
@@ -259,7 +278,9 @@ class SystemOrchestrator:
     def _perform_health_check(self):
         """Perform system health check"""
         health_status = {
-            'timestamp': datetime.utcnow().isoformat(),
+            'timestamp': datetime.now(timezone.utc)
+
+.isoformat(),
             'components_running': len(self.components_running),
             'expected_components': sum(1 for comp in self.config['components'].values() if comp['enabled']),
             'system_healthy': True,
@@ -367,7 +388,9 @@ class SystemOrchestrator:
             self.system_stats['errors'].append({
                 'component': 'system',
                 'error': str(e),
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': datetime.now(timezone.utc)
+
+.isoformat()
             })
             return False
     
@@ -408,7 +431,9 @@ class SystemOrchestrator:
             self.system_stats['errors'].append({
                 'component': 'system_run',
                 'error': str(e),
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': datetime.now(timezone.utc)
+
+.isoformat()
             })
     
     def stop_system(self):
@@ -449,7 +474,9 @@ class SystemOrchestrator:
                 
                 self.system_stats['components_stopped'].append({
                     'component': component,
-                    'timestamp': datetime.utcnow().isoformat()
+                    'timestamp': datetime.now(timezone.utc)
+
+.isoformat()
                 })
                 
                 logger.info(f"{component} stopped successfully")
@@ -459,7 +486,9 @@ class SystemOrchestrator:
                 self.system_stats['errors'].append({
                     'component': component,
                     'error': str(e),
-                    'timestamp': datetime.utcnow().isoformat()
+                    'timestamp': datetime.now(timezone.utc)
+
+.isoformat()
                 })
         
         # Calculate total runtime
@@ -493,7 +522,9 @@ class SystemOrchestrator:
             'component_performance': {},
             'system_stats': self.system_stats.copy(),
             'last_health_check': self.system_stats.get('last_health_check'),
-            'generated_at': datetime.utcnow().isoformat()
+            'generated_at': datetime.now(timezone.utc)
+
+.isoformat()
         }
         
         # Get component-specific stats
@@ -584,7 +615,7 @@ Examples:
     logging.getLogger().setLevel(getattr(logging, args.log_level))
     
     # Print banner
-    print_system_banner()
+    #print_system_banner()
     
     # Create system configuration
     config = {
@@ -602,9 +633,13 @@ Examples:
                 'enabled': not args.disable_agent,
                 'model_path': args.model_path,
                 'config': {
-                    'decision_interval': 5.0 if args.fast_mode else 8.0,
-                    'confidence_threshold': 0.2,
-                    'max_price_change': 0.15
+                    'decision_interval':3.0 if args.fast_mode else 5.0,
+                    'confidence_threshold': 0.05,
+                    'max_price_change': 0.30,
+                    'observation_window': 10,
+                    'warm_up_steps': 5,
+                    'agent_id': 'rl_pricing_agent_001',
+                    'fallback_pricing': True
                 }
             },
             'pricing_environment': {
@@ -619,7 +654,8 @@ Examples:
             }
         },
         'health_check_interval': 15.0 if args.fast_mode else 30.0,
-        'startup_delay': 1.0 if args.fast_mode else 2.0
+        'startup_delay': 1.0 if args.fast_mode else 2.0,
+        'shutdown_timeout': 10
     }
     
     # Create and run orchestrator
